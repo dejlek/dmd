@@ -487,6 +487,24 @@ extern (C) void rt_finalize2(void* p, bool det = true, bool resetMemory = true) 
     if (!p || !*ppv)
         return;
 
+    // Validate that the vtable pointer looks like a valid ClassInfo.
+    // On 64-bit systems, user-space pointers are below 0x0000800000000000
+    // and must be at least pointer-aligned. This guards against the
+    // conservative GC sweeping a block whose FINALIZE bit is stale.
+    auto vptr = *ppv;
+    static if (size_t.sizeof == 8)
+        enum maxUserAddr = 0x7FFFFFFFFFFFUL;
+    else
+        enum maxUserAddr = uint.max;
+    if (vptr < cast(void*)0x1000 ||
+        cast(size_t)vptr > maxUserAddr ||
+        (cast(size_t)vptr & (size_t.sizeof - 1)) != 0)
+    {
+        debug(PRINTF) printf("rt_finalize2: skipping invalid vtable %p at %p\n", vptr, p);
+        *ppv = null;
+        return;
+    }
+
     auto pc = cast(ClassInfo*) *ppv;
     try
     {
@@ -1121,4 +1139,32 @@ unittest
     {
         s.thisptr = &s;
     }
+}
+
+// Regression test: rt_finalize2 must not crash on invalid vtable pointers.
+// This can happen when the conservative GC sweeps a block whose FINALIZE
+// bit is stale because the memory was reused for non-class data.
+unittest
+{
+    import core.memory : GC;
+
+    auto p = GC.malloc(32, GC.BlkAttr.FINALIZE);
+    auto ppv = cast(void**) p;
+
+    *ppv = cast(void*) 1;
+    rt_finalize2(p, false, false);
+
+    static if (size_t.sizeof == 8)
+    {
+        *ppv = cast(void*) 0x6000000000000000UL;
+        rt_finalize2(p, false, false);
+
+        *ppv = cast(void*) 0x10107e8;
+        rt_finalize2(p, false, false);
+    }
+
+    *ppv = null;
+    rt_finalize2(p, false, false);
+
+    GC.free(p);
 }

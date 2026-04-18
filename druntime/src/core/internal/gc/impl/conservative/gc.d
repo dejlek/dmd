@@ -59,6 +59,29 @@ debug (VALGRIND) import etc.valgrind.valgrind;
 import core.time;
 alias currTime = MonoTime.currTime;
 
+version (linux)
+{
+    extern(C) int mincore(void* start, size_t len, ubyte* vec) nothrow @nogc @system;
+    
+    private bool isReadableAddr(void* p) nothrow @nogc
+    {
+        ubyte vec;
+        auto page = cast(void*)(cast(size_t)p & ~cast(size_t)4095);
+        return mincore(page, 1, &vec) == 0;
+    }
+}
+else
+{
+    private bool isReadableAddr(void* p) nothrow @nogc
+    {
+        auto a = cast(size_t)p;
+        static if (size_t.sizeof == 8)
+            return a >= 0x1000 && a <= 0x7FFFFFFFFFFFUL && (a & 7) == 0;
+        else
+            return a >= 0x1000 && (a & 3) == 0;
+    }
+}
+
 // Track total time spent preparing for GC,
 // marking, sweeping and recovering pages.
 __gshared Duration prepTime;
@@ -2892,8 +2915,15 @@ struct Gcx
                             uint attr = pool.getBits(biti);
                             auto ti = __getBlockFinalizerInfo(q, size, attr);
                             __trimExtents(q, size, attr);
+                            if (ti is null)
+                            {
+                                auto vptr = *cast(void**)q;
+                                if (!vptr || findPool(vptr) !is null || !isReadableAddr(vptr))
+                                    goto LskipFinalizeLarge;
+                            }
                             rt_finalizeFromGC(q, size, attr, ti);
                         }
+                    LskipFinalizeLarge:
 
                         pool.clrBits(biti, ~BlkAttr.NONE ^ BlkAttr.FINALIZE);
 
@@ -3020,8 +3050,20 @@ struct Gcx
                                     uint attr = pool.getBits(biti);
                                     auto ti = __getBlockFinalizerInfo(q, ssize, attr);
                                     __trimExtents(q, ssize, attr);
+                                    // Validate vtable for class finalization (ti == null).
+                                    // A valid ClassInfo lives in the binary's read-only data,
+                                    // never on the GC heap. If the vtable pointer falls
+                                    // inside a GC pool, the block has been reused for
+                                    // non-class data with a stale FINALIZE bit.
+                                    if (ti is null)
+                                    {
+                                        auto vptr = *cast(void**)q;
+                                        if (!vptr || findPool(vptr) !is null || !isReadableAddr(vptr))
+                                            goto LskipFinalize;
+                                    }
                                     rt_finalizeFromGC(q, ssize, attr, ti);
                                 }
+                            LskipFinalize:
 
                                 assert(core.bitop.bt(toFree.ptr, i));
 
@@ -5543,4 +5585,23 @@ private void[] setupMetadata(void[] block, uint bits, size_t padding, size_t use
     }
 
     return block.ptr[0 .. block.length - padding];
+}
+
+// Regression test: GC sweep must not crash when encountering a stale
+// FINALIZE bit on memory that has been reused for non-class data.
+// The vtable validation (findPool + isReadableAddr) should skip such blocks.
+unittest
+{
+    version (linux)
+    {
+        assert(!isReadableAddr(null));
+        assert(!isReadableAddr(cast(void*) 1));
+        assert(!isReadableAddr(cast(void*) 0x100));
+
+        int stackVar;
+        assert(isReadableAddr(&stackVar));
+
+        auto p = new int;
+        assert(isReadableAddr(cast(void*) p));
+    }
 }
