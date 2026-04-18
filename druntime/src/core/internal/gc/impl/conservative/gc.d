@@ -62,7 +62,7 @@ alias currTime = MonoTime.currTime;
 version (linux)
 {
     extern(C) int mincore(void* start, size_t len, ubyte* vec) nothrow @nogc @system;
-    
+
     private bool isReadableAddr(void* p) nothrow @nogc
     {
         ubyte vec;
@@ -5590,6 +5590,7 @@ private void[] setupMetadata(void[] block, uint bits, size_t padding, size_t use
 // Regression test: GC sweep must not crash when encountering a stale
 // FINALIZE bit on memory that has been reused for non-class data.
 // The vtable validation (findPool + isReadableAddr) should skip such blocks.
+// https://github.com/dlang/dmd/issues/22884
 unittest
 {
     version (linux)

@@ -1144,6 +1144,7 @@ unittest
 // Regression test: rt_finalize2 must not crash on invalid vtable pointers.
 // This can happen when the conservative GC sweeps a block whose FINALIZE
 // bit is stale because the memory was reused for non-class data.
+// https://github.com/dlang/dmd/issues/22884
 unittest
 {
     import core.memory : GC;
